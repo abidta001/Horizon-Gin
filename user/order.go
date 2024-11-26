@@ -3,7 +3,7 @@ package user
 import (
 	"context"
 	"fmt"
-	"log"
+
 	"math"
 	"net/http"
 	"time"
@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/plutov/paypal/v4"
-
+	log "github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
@@ -37,6 +37,11 @@ func Orders(c *gin.Context) {
 	userID := claims.ID
 
 	if err := db.Db.Where("user_id=? AND address_id=?", userID, input.AddressID).First(&address).Error; err != nil {
+		log.WithFields(log.Fields{
+			"UserID":    userID,
+			"AddressID": input.AddressID,
+			"error":     err,
+		}).Error("error querying address")
 		c.JSON(http.StatusNotFound, gin.H{"error": "Address not found"})
 		return
 	}
@@ -46,6 +51,10 @@ func Orders(c *gin.Context) {
 		Joins("left join products on carts.product_id = products.product_id").
 		Where("carts.user_id = ?", userID).
 		Scan(&cart).Error; err != nil {
+		log.WithFields(log.Fields{
+			"UserID": userID,
+			"error":  err,
+		}).Error("error querying carts")
 		c.JSON(http.StatusNotFound, gin.H{"error": "Could not fetch cart", "details": err.Error()})
 		return
 	}
@@ -97,6 +106,9 @@ func Orders(c *gin.Context) {
 
 		product.Quantity -= item.Quantity
 		if err := db.Db.Save(&product).Error; err != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Error("error saving product")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update product stock"})
 			return
 		}
@@ -166,6 +178,10 @@ func Orders(c *gin.Context) {
 
 		order, err := createOrder(userID, input, orderItems, totalAmount, totalQuantity, totalDiscount, coupon)
 		if err != nil {
+			log.WithFields(log.Fields{
+				"UserID": userID,
+				"error":  err,
+			}).Error("error creating order")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -183,6 +199,79 @@ func Orders(c *gin.Context) {
 		}
 
 		c.JSON(http.StatusOK, gin.H{"message": "Order placed successfully", "order": orderResponse})
+	case "Wallet":
+		var wallet models.Wallet
+
+		if err := db.Db.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
+			log.WithFields(log.Fields{"UserID": userID}).Error("Cannot find wallet")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot find wallet"})
+			return
+		}
+
+		if totalAmount > wallet.Balance {
+			c.JSON(http.StatusBadRequest, gin.H{"message": "Insufficient wallet balance"})
+			return
+		}
+
+		order := models.Order{
+			UserID:        int(userID),
+			CouponID:      coupon.CouponID,
+			Quantity:      totalQuantity,
+			Discount:      totalDiscount,
+			Total:         totalAmount,
+			Status:        "Pending",
+			Method:        input.Method,
+			PaymentStatus: "Pending",
+			OrderDate:     time.Now(),
+		}
+
+		tx := db.Db.Begin()
+
+		wallet.Balance -= totalAmount
+		if err := tx.Save(&wallet).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update wallet balance"})
+			return
+		}
+
+		if err := tx.Create(&order).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create order"})
+			return
+		}
+
+		for _, item := range orderItems {
+			item.OrderID = order.OrderID
+			if err := tx.Create(&item).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add order item"})
+				return
+			}
+		}
+
+		if err := tx.Where("user_id = ?", userID).Delete(&models.Cart{}).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear cart"})
+			return
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+			return
+		}
+		orderResponse := responsemodels.OrderResponse{
+			UserID:         int(userID),
+			OrderID:        order.OrderID,
+			Quantity:       totalQuantity,
+			DiscountAmount: totalDiscount,
+			Total:          totalAmount,
+			Status:         order.Status,
+			Method:         order.Method,
+			PaymentStatus:  order.PaymentStatus,
+			OrderDate:      order.OrderDate,
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Order placed successfully", "order": orderResponse})
+
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment method"})
 		return
@@ -214,7 +303,13 @@ func ReturnOrder(c *gin.Context) {
 	}
 	order.Status = "Returned"
 
-	db.Db.Save(&order)
+	if err := db.Db.Save(&order).Error; err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("error saving order")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	for _, item := range order.OrderItems {
 		db.Db.Model(&models.Product{}).Where("product_id = ?", item.ProductID).Update("quantity", gorm.Expr("quantity + ?", item.Quantity))
@@ -330,6 +425,10 @@ func CapturePayPalOrder(c *gin.Context) {
 	}
 
 	if err := db.Db.Create(&originalOrder).Error; err != nil {
+		log.WithFields(log.Fields{
+			"PaymentID": originalOrder.PaymentID,
+			"error":     err,
+		}).Error("error creating order")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create original order"})
 		return
 	}
@@ -352,6 +451,10 @@ func CapturePayPalOrder(c *gin.Context) {
 	}
 
 	if err := db.Db.Create(&orderItems).Error; err != nil {
+		log.WithFields(log.Fields{
+			"OrderID": originalOrder.OrderID,
+			"error":   err,
+		}).Error("error creating orderItems")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create order items"})
 		return
 	}

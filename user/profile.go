@@ -162,7 +162,7 @@ func ViewOrders(c *gin.Context) {
 
 func CancelOrders(c *gin.Context) {
 	var orders models.Order
-	var orderItems []models.OrderItem
+	var orderItem models.OrderItem
 	var wallet models.Wallet
 
 	claims, _ := c.Get("claims")
@@ -175,6 +175,7 @@ func CancelOrders(c *gin.Context) {
 
 	userID := customClaims.ID
 	OrderID := c.Param("id")
+	ProductID := c.Query("product_id")
 
 	orderID, err := strconv.Atoi(OrderID)
 	if err != nil {
@@ -182,41 +183,47 @@ func CancelOrders(c *gin.Context) {
 		return
 	}
 
+	productID, err := strconv.Atoi(ProductID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
+		return
+	}
+
+	// Verify order ownership
 	if err := db.Db.Where("order_id = ? AND user_id = ?", orderID, userID).First(&orders).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "Order not found or unauthorized"})
 		return
 	}
 
+	// Check if the order or product is cancellable
 	if orders.Status == "Canceled" || orders.Status == "Delivered" || orders.Status == "Failed" || orders.Status == "Shipped" {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Cannot cancel order"})
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Cannot cancel this order or product"})
 		return
 	}
 
-	if err := db.Db.Where("order_id = ?", orderID).Find(&orderItems).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Order items not found"})
+	if err := db.Db.Where("order_id = ? AND product_id = ?", orderID, productID).First(&orderItem).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Order item not found"})
 		return
 	}
 
-	for _, item := range orderItems {
-		var product models.Product
-
-		if err := db.Db.First(&product, item.ProductID).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Product not found"})
-			return
-		}
-
-		product.Quantity += item.Quantity
-
-		if err := db.Db.Save(&product).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to update product quantity"})
-			return
-		}
+	// Update product quantity
+	var product models.Product
+	if err := db.Db.First(&product, productID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Product not found"})
+		return
 	}
 
+	product.Quantity += orderItem.Quantity
+
+	if err := db.Db.Save(&product).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to update product quantity"})
+		return
+	}
+
+	// Refund logic if payment was through PayPal
 	if orders.Method == "Paypal" {
-
 		if err := db.Db.Where("user_id=?", userID).First(&wallet).Error; err == nil {
-			wallet.Balance += orders.Total
+			wallet.Balance += orderItem.Price * float64(orderItem.Quantity)
 			if err := db.Db.Save(&wallet).Error; err != nil {
 				log.WithFields(log.Fields{
 					"UserID": userID,
@@ -226,43 +233,51 @@ func CancelOrders(c *gin.Context) {
 			}
 			walletTransaction := models.WalletTransaction{
 				UserID:          userID,
-				OrderID:         uint(orders.OrderID),
-				Amount:          orders.Total,
+				OrderID:         uint(orderID),
+				Amount:          orderItem.Price * float64(orderItem.Quantity),
 				TransactionType: "Credit",
-				Description:     "Refund for Order #" + strconv.Itoa(int(orders.OrderID)),
+				Description:     "Refund for Product #" + strconv.Itoa(productID),
 			}
 			if err := db.Db.Create(&walletTransaction).Error; err != nil {
 				log.WithFields(log.Fields{
 					"UserID":  userID,
-					"OrderID": orders.OrderID,
-				}).Error("Cannot create transcation")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot create Transaction"})
+					"OrderID": orderID,
+				}).Error("Cannot create transaction")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot create transaction"})
 				return
 			}
-
 		} else if err == gorm.ErrRecordNotFound {
-
-			NewWallet := models.Wallet{
+			newWallet := models.Wallet{
 				UserID:  userID,
-				Balance: orders.Total,
+				Balance: orderItem.Price * float64(orderItem.Quantity),
 			}
-			if err := db.Db.Create(&NewWallet).Error; err != nil {
+			if err := db.Db.Create(&newWallet).Error; err != nil {
 				log.WithFields(log.Fields{
 					"UserID": userID,
-					"Wallet": wallet.WalletID,
 				}).Error("Cannot create wallet")
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create wallet"})
 				return
 			}
 		}
 	}
-	orders.Status = "Canceled"
-	if err := db.Db.Save(&orders).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to save order status"})
+
+	// Remove the canceled order item
+	if err := db.Db.Delete(&orderItem).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to cancel order item"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Order canceled successfully"})
+	// Check if all items are canceled to update order status
+	var remainingItems []models.OrderItem
+	if err := db.Db.Where("order_id = ?", orderID).Find(&remainingItems).Error; err == nil && len(remainingItems) == 0 {
+		orders.Status = "Canceled"
+		if err := db.Db.Save(&orders).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to update order status"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Order item canceled successfully"})
 }
 
 func ForgotPassword(c *gin.Context) {

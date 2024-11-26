@@ -3,6 +3,7 @@ package salesreport
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	db "admin/DB"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/signintech/gopdf"
+	log "github.com/sirupsen/logrus"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -84,49 +86,62 @@ func GeneratePDFReport(report models.SalesReport) (string, error) {
 	pdf := gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4})
 
+	// Load font
 	err := pdf.AddTTFFont("Arial", "/System/Library/Fonts/Supplemental/Arial.ttf")
 	if err != nil {
 		return "", err
 	}
-
 	err = pdf.SetFont("Arial", "", 14)
 	if err != nil {
 		return "", err
 	}
 
+	// Add a page
 	pdf.AddPage()
 
-	// Header
+	// Title
+	pdf.SetFont("Arial", "B", 18)
 	pdf.Cell(nil, "Sales Report")
-	pdf.Br(30)
+	pdf.Br(20)
+
+	// Date and Time
+	pdf.SetFont("Arial", "", 12)
+	pdf.Cell(nil, "Generated on: "+time.Now().Format("02-Jan-2006 15:04:05"))
+	pdf.Br(20)
+
+	// Summary Section
+	pdf.SetFont("Arial", "B", 14)
+	pdf.Cell(nil, "Summary")
+	pdf.Br(10)
+	pdf.SetFont("Arial", "", 12)
 	pdf.Cell(nil, "Total Sales Count: "+fmt.Sprintf("%d", report.TotalSalesCount))
-	pdf.Br(15)
+	pdf.Br(10)
 	pdf.Cell(nil, "Total Order Amount: "+fmt.Sprintf("%.2f", report.TotalOrderAmount))
-	pdf.Br(15)
+	pdf.Br(10)
 	pdf.Cell(nil, "Total Discount: "+fmt.Sprintf("%.2f", report.TotalDiscount))
-	pdf.Br(15)
+	pdf.Br(10)
 	pdf.Cell(nil, "Coupons Deduction: "+fmt.Sprintf("%.2f", report.CouponsDeduction))
-	pdf.Br(30)
+	pdf.Br(20)
 
-	// Table Header
-	err = pdf.SetFont("Arial", "", 12)
-	if err != nil {
-		return "", err
-	}
-
+	// Product Details Section
+	pdf.SetFont("Arial", "B", 14)
 	pdf.Cell(nil, "Product Details")
-	pdf.Br(20)
+	pdf.Br(15)
 
-	pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, "ProductID", gopdf.CellOption{Align: gopdf.Middle})
-	pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, "Quantity", gopdf.CellOption{Align: gopdf.Middle})
-	pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, "Total Price", gopdf.CellOption{Align: gopdf.Middle})
-	pdf.Br(20)
+	// Table Headers
+	pdf.SetFont("Arial", "B", 12)
+	pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, "Product ID", gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
+	pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, "Quantity", gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
+	pdf.CellWithOption(&gopdf.Rect{W: 80, H: 20}, "Total Price", gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
+	pdf.Line(5, pdf.GetY()+20, 200, pdf.GetY()+20) // Line separator
+	pdf.Br(25)
 
 	// Table Rows
+	pdf.SetFont("Arial", "", 12)
 	for _, product := range report.ProductSales {
-		pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, fmt.Sprintf("%d", product.ProductID), gopdf.CellOption{Align: gopdf.Middle})
-		pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, fmt.Sprintf("%d", product.Quantity), gopdf.CellOption{Align: gopdf.Middle})
-		pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, fmt.Sprintf("%.2f", product.TotalPrice), gopdf.CellOption{Align: gopdf.Middle})
+		pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, fmt.Sprintf("%d", product.ProductID), gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
+		pdf.CellWithOption(&gopdf.Rect{W: 60, H: 20}, fmt.Sprintf("%d", product.Quantity), gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
+		pdf.CellWithOption(&gopdf.Rect{W: 80, H: 20}, fmt.Sprintf("%.2f", product.TotalPrice), gopdf.CellOption{Align: gopdf.Middle | gopdf.Center})
 		pdf.Br(20)
 	}
 
@@ -137,6 +152,7 @@ func GeneratePDFReport(report models.SalesReport) (string, error) {
 	}
 	return "sales_report.pdf", nil
 }
+
 func GenerateExcelReport(report models.SalesReport) (string, error) {
 	f := excelize.NewFile()
 	f.SetCellValue("Sheet1", "A1", "Sales Report")
@@ -156,4 +172,189 @@ func GenerateExcelReport(report models.SalesReport) (string, error) {
 	}
 
 	return outputPath, nil
+}
+
+func GetSalesData(c *gin.Context) {
+	filter := c.Query("filter")
+
+	var dates []string
+	var sales []float64
+
+	switch filter {
+	case "yearly":
+		rows, err := db.Db.Raw(`
+			  SELECT TO_CHAR(order_date, 'YYYY') AS date, SUM(total) AS sales
+			  FROM orders
+			  GROUP BY TO_CHAR(order_date, 'YYYY')
+			  ORDER BY TO_CHAR(order_date, 'YYYY')
+		 `).Rows()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Error("Error in database query")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var date string
+			var sale float64
+			if err := rows.Scan(&date, &sale); err != nil {
+				log.WithFields(log.Fields{
+					"error": err,
+				}).Error("Error in scanning column")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			dates = append(dates, date)
+			sales = append(sales, sale)
+		}
+
+	case "monthly":
+		rows, err := db.Db.Raw(`
+			  SELECT TO_CHAR(order_date, 'YYYY-MM') AS date, SUM(total) AS sales
+			  FROM orders
+			  GROUP BY TO_CHAR(order_date, 'YYYY-MM')
+			  ORDER BY TO_CHAR(order_date, 'YYYY-MM')
+		 `).Rows()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Error("error in scanning column")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var date string
+			var sale float64
+			if err := rows.Scan(&date, &sale); err != nil {
+				log.WithFields(log.Fields{
+					"error": err,
+				}).Error("error in scanning column")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			dates = append(dates, date)
+			sales = append(sales, sale)
+		}
+
+	case "weekly":
+		rows, err := db.Db.Raw(`
+			  SELECT TO_CHAR(order_date, 'IYYY-IW') AS date, SUM(total) AS sales
+			  FROM orders
+			  GROUP BY TO_CHAR(order_date, 'IYYY-IW')
+			  ORDER BY TO_CHAR(order_date, 'IYYY-IW')
+		 `).Rows()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error": err,
+			}).Error("error in scannning column")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var date string
+			var sale float64
+			if err := rows.Scan(&date, &sale); err != nil {
+				log.WithFields(log.Fields{
+					"error": err,
+				}).Error("Error in scanning rows")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			dates = append(dates, date)
+			sales = append(sales, sale)
+		}
+
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filter"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"dates": dates,
+		"sales": sales,
+	})
+}
+
+func GetTopSellingProducts(c *gin.Context) {
+	limitParam := c.DefaultQuery("limit", "10")
+	limit, err := strconv.Atoi(limitParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit parameter"})
+		return
+	}
+
+	var products []map[string]interface{}
+
+	err = db.Db.Table("order_items").
+		Select("product_id, SUM(quantity) as total_sold").
+		Group("product_id").
+		Order("total_sold DESC").
+		Limit(limit).
+		Scan(&products).Error
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("error in querying order_items")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, products)
+}
+
+func GetTopSellingCategories(c *gin.Context) {
+	limitParam := c.DefaultQuery("limit", "10")
+	limit, err := strconv.Atoi(limitParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit parameter"})
+		return
+	}
+
+	var categories []map[string]interface{}
+
+	err = db.Db.Table("order_items").
+		Joins("JOIN products ON order_items.product_id = products.product_id").
+		Select("products.category_id, SUM(order_items.quantity) as total_sold").
+		Group("products.category_id").
+		Order("total_sold DESC").
+		Limit(limit).
+		Scan(&categories).Error
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Error in querying order_items")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, categories)
+}
+
+func GetLedgerBook(c *gin.Context) {
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
+
+	var ledgerEntries []map[string]interface{}
+
+	if err := db.Db.Table("orders").
+		Select("order_date as date, 'Sale' as type, total as amount, order_id").
+		Where("order_date BETWEEN ? AND ?", startDate, endDate).
+		Order("order_date DESC").
+		Find(&ledgerEntries); err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("error in querying orders")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error})
+		return
+
+	}
+
+	c.JSON(http.StatusOK, ledgerEntries)
 }

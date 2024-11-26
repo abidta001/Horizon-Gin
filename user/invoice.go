@@ -3,9 +3,12 @@ package user
 import (
 	"bytes"
 	"fmt"
+	"net/http"
+	"time"
 
+	db "admin/DB"
 	"admin/models"
-
+	"github.com/gin-gonic/gin"
 	"github.com/signintech/gopdf"
 )
 
@@ -14,11 +17,11 @@ func GeneratePDF(invoice models.Invoice) ([]byte, error) {
 	pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4})
 	pdf.AddPage()
 
-	err := pdf.AddTTFFont("DejaVuSans", "/home/athul/Documents/The Furnish spot/fonts/arial.ttf")
+	err := pdf.AddTTFFont("Arial", "/System/Library/Fonts/Supplemental/Arial.ttf")
 	if err != nil {
 		return nil, fmt.Errorf("failed to add font: %w", err)
 	}
-	err = pdf.SetFont("DejaVuSans", "", 12)
+	err = pdf.SetFont("Arial", "", 12)
 	if err != nil {
 		return nil, fmt.Errorf("cannot set font: %w", err)
 	}
@@ -32,7 +35,7 @@ func GeneratePDF(invoice models.Invoice) ([]byte, error) {
 	pdf.Cell(nil, fmt.Sprintf("Customer ID: %d", invoice.UserID))
 	pdf.Br(17)
 
-	pdf.SetFont("DejaVuSans", "", 10)
+	err = pdf.SetFont("Arial", "", 12)
 
 	pdf.Cell(nil, "ProductID")
 	pdf.SetX(150)
@@ -75,7 +78,7 @@ func GeneratePDF(invoice models.Invoice) ([]byte, error) {
 	total := subtotal - discountApplied
 
 	pdf.Br(15)
-	pdf.SetFont("DejaVuSans", "", 12)
+	err = pdf.SetFont("Arial", "", 14)
 	pdf.Cell(nil, fmt.Sprintf("Subtotal: %.2f", subtotal))
 	pdf.Br(15)
 	pdf.Cell(nil, fmt.Sprintf("Discount Applied: %.2f", discountApplied))
@@ -91,4 +94,54 @@ func GeneratePDF(invoice models.Invoice) ([]byte, error) {
 	}
 
 	return buffer.Bytes(), nil
+}
+func GenerateInvoiceHandler(c *gin.Context) {
+	var invoice models.Invoice
+	var order models.Order
+	var items []models.OrderItem
+	OrderID := c.Param("id")
+
+	if err := db.Db.Where("order_id = ?", OrderID).First(&order).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot find order"})
+		return
+	}
+
+	if err := db.Db.Where("order_id = ?", OrderID).Find(&items).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot find order items"})
+		return
+	}
+
+	var invoiceItems []models.InvoiceItem
+	var subtotal float64
+	for _, item := range items {
+		totalPrice := (item.Price * float64(item.Quantity)) - item.Discount
+
+		invoiceItems = append(invoiceItems, models.InvoiceItem{
+			ProductID:  item.ProductID,
+			Discount:   float64(item.Discount),
+			Quantity:   item.Quantity,
+			UnitPrice:  item.Price,
+			TotalPrice: totalPrice,
+		})
+
+		subtotal += totalPrice
+	}
+
+	invoice.InvoiceID = fmt.Sprintf("INV-%d", order.OrderID)
+	invoice.Date = time.Now()
+	invoice.UserID = order.UserID
+	invoice.Subtotal = subtotal
+	invoice.Discount = order.Discount
+	invoice.Total = subtotal - order.Discount
+	invoice.Items = invoiceItems
+
+	pdfBytes, err := GeneratePDF(invoice)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate invoice: %v", err)})
+		return
+	}
+
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s.pdf", invoice.InvoiceID))
+	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }

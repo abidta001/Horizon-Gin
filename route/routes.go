@@ -2,7 +2,7 @@ package route
 
 import (
 	"admin/admin"
-	adminuser "admin/admin/adminuser"
+	adminuser "admin/admin/adminUser"
 	"admin/admin/category"
 	"admin/admin/coupon"
 	"admin/admin/offer"
@@ -18,7 +18,6 @@ import (
 
 func RegisterURL(router *gin.Engine) {
 	//User
-
 	router.POST("/signup", user.SignUp)
 	router.GET("/googlelogin", user.HandleGoogleLogin)
 	router.GET("/auth/google/callback", user.HandleGoogleCallback)
@@ -43,20 +42,20 @@ func RegisterURL(router *gin.Engine) {
 
 	//Orders
 	router.GET("/vieworders", middleware.AuthMiddleware("user"), user.ViewOrders)
-	router.DELETE("/orders/cancelorder/:id", middleware.AuthMiddleware("user"), user.CancelOrders)
+	router.DELETE("/orders/:id/delete", middleware.AuthMiddleware("user"), user.CancelOrders)
 	router.POST("/users/order", middleware.AuthMiddleware("user"), user.Orders)
 	router.GET("/paypal/confirmpayment", user.CapturePayPalOrder)
 	router.GET("/paypal/cancel-payment", user.CapturePayPalOrder)
 	router.POST("/user/returnorder", middleware.AuthMiddleware("user"), user.ReturnOrder)
-
+	router.POST("/user/generate-invoice/:id", middleware.AuthMiddleware("user"), user.GenerateInvoiceHandler)
 	//Cart
 	router.GET("/user/cart", middleware.AuthMiddleware("user"), user.Cart)
 	router.POST("/user/addtocart", middleware.AuthMiddleware("user"), user.AddToCart)
 	router.DELETE("user/removeitem/:id", middleware.AuthMiddleware("user"), user.RemoveItem)
 
 	//Whishlist
-	router.GET("/user/viewwishlist", middleware.AuthMiddleware("user"), user.ViewWhishlist)
-	router.POST("/user/addtowishlist", middleware.AuthMiddleware("user"), user.AddToWhishlist)
+	router.GET("/user/viewwhishlist", middleware.AuthMiddleware("user"), user.ViewWhishlist)
+	router.POST("/user/addtowhishlist", middleware.AuthMiddleware("user"), user.AddToWhishlist)
 	router.DELETE("/user/removeitem", middleware.AuthMiddleware("user"), user.WishlistRemoveItem)
 	router.DELETE("/user/clearwishlist", middleware.AuthMiddleware("user"), user.ClearWishlist)
 
@@ -70,7 +69,6 @@ func RegisterURL(router *gin.Engine) {
 
 	//Admin
 	router.POST("/adminlogin", admin.AdminLogin)
-
 	router.GET("/viewcategories", middleware.AuthMiddleware("admin"), category.ViewCategory)
 	router.POST("/addcategory", middleware.AuthMiddleware("admin"), category.AddCategory)
 	router.PUT("/updatecategory/:id", middleware.AuthMiddleware("admin"), category.EditCategory)
@@ -80,7 +78,7 @@ func RegisterURL(router *gin.Engine) {
 	router.POST("/addproducts", middleware.AuthMiddleware("admin"), product.AddProducts)
 	router.PUT("/updateproduct/:id", middleware.AuthMiddleware("admin"), product.UpdateProduct)
 	router.DELETE("/deleteproduct/:id", middleware.AuthMiddleware("admin"), product.DeleteProduct)
-	router.PUT("/updatestock/:id", middleware.AuthMiddleware("admin"), product.UpdateProductStock)
+	router.PUT("/admin/updatestock/:id", middleware.AuthMiddleware("admin"), product.UpdateProductStock)
 
 	router.GET("/listusers", middleware.AuthMiddleware("admin"), adminuser.ListUsers)
 	router.POST("blockuser/:id", middleware.AuthMiddleware("admin"), adminuser.BlockUser)
@@ -98,5 +96,9 @@ func RegisterURL(router *gin.Engine) {
 	router.PUT("/admin/updateoffer", middleware.AuthMiddleware("admin"), offer.UpdateOffer)
 
 	router.GET("/generate-report", middleware.AuthMiddleware("admin"), salesreport.GenerateReport)
+	router.GET("/get-sales-data", middleware.AuthMiddleware("admin"), salesreport.GetSalesData)
+	router.GET("/top-selling-product", middleware.AuthMiddleware("admin"), salesreport.GetTopSellingProducts)
+	router.GET("/top-selling-category", middleware.AuthMiddleware("admin"), salesreport.GetTopSellingCategories)
+	router.GET("/ledger-book", middleware.AuthMiddleware("admin"), salesreport.GetLedgerBook)
 
 }
